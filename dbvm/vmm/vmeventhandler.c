@@ -144,7 +144,7 @@ int emulateExceptionInterrupt(pcpuinfo currentcpuinfo, VMRegisters *vmregisters,
   //nosendchar[getAPICID()]=1;
 
   sendstring("Emulation\n");
-  if (vmread(vm_guest_cs)==0x10)
+  if ((isAMD?currentcpuinfo->vmcb->cs_selector:vmread(vm_guest_cs))==0x10)
   {
     sendstring("!!!!!FROM KERNELMODE (assuming it\'s windows 64)!!!!!\n");
   }
@@ -3702,7 +3702,7 @@ InterruptFired:
 int handleSingleStep(pcpuinfo currentcpuinfo)
 {
   //handle the reasons one by one. (Used by AMD as well)
-  sendstringf("handleSingleStep.  currentcpuinfo->singleStepping.ReasonsPos=%d\n", currentcpuinfo->singleStepping.ReasonsPos);
+  sendstringf("%d: handleSingleStep.  currentcpuinfo->singleStepping.ReasonsPos=%d\n", currentcpuinfo->cpunr, currentcpuinfo->singleStepping.ReasonsPos);
 
 
   while (currentcpuinfo->singleStepping.ReasonsPos)

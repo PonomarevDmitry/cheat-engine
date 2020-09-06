@@ -34,6 +34,7 @@ int eptWatchListPos;
 criticalSection CloakedPagesCS; //1
 PAddressList CloakedPagesList; //up to 40 entries can be found in 5 steps (worst case scenario)
 PMapInfo CloakedPagesMap; //can be found in 5 steps, always (and eats memory) , so if CloakedPagesPos>40 then start using this (and move the old list over)
+//todo: Create a MapList object that combines both into one
 
 
 
@@ -165,9 +166,10 @@ BOOL ept_handleCloakEvent(pcpuinfo currentcpuinfo, QWORD Address, QWORD AddressV
     {
 
       cloakdata=currentcpuinfo->NP_Cloak.ActiveRegion;
-      sendstringf("Inside a cloaked region using mode 1 (which started in %6) and an execute fault happened (CS:RIP=%x:%6)\n", currentcpuinfo->NP_Cloak.LastCloakedVirtualBase, currentcpuinfo->vmcb->cs_selector, currentcpuinfo->vmcb->RIP);
+     // sendstringf("Inside a cloaked region using mode 1 (which started in %6) and an execute fault happened (CS:RIP=%x:%6)\n", currentcpuinfo->NP_Cloak.LastCloakedVirtualBase, currentcpuinfo->vmcb->cs_selector, currentcpuinfo->vmcb->RIP);
 
       //means we exited the cloaked page (or at the page boundary)
+
       csEnter(&CloakedPagesCS);
       NPMode1CloakSetState(currentcpuinfo, 0); //marks all pages back as executable and the stealthed page(s) back as no execute
       csLeave(&CloakedPagesCS);
@@ -198,7 +200,7 @@ BOOL ept_handleCloakEvent(pcpuinfo currentcpuinfo, QWORD Address, QWORD AddressV
       ept_invalidate();
 
 
-      return TRUE; //could be a page not found event, but that will just retry
+      return TRUE;
     }
   }
 
@@ -215,7 +217,7 @@ BOOL ept_handleCloakEvent(pcpuinfo currentcpuinfo, QWORD Address, QWORD AddressV
 
 
     //it's a cloaked page
-    sendstringf("ept_handleCloakEvent on the target(CS:RIP=%x:%6)\n", currentcpuinfo->vmcb->cs_selector, currentcpuinfo->vmcb->RIP);
+    //sendstringf("ept_handleCloakEvent on the target(CS:RIP=%x:%6)\n", currentcpuinfo->vmcb->cs_selector, currentcpuinfo->vmcb->RIP);
 
     if (isAMD)
     {
@@ -472,9 +474,15 @@ int ept_cloak_activate(QWORD physicalAddress, int mode)
   //map in the physical address descriptor for all CPU's as execute only
   pcpuinfo currentcpuinfo=firstcpuinfo;
 
+  //lock ANY other CPU from triggering (a cpu could trigger before this routine is done)
+
+
+  sendstringf("Cloaking memory (initiated by cpu %d) \n", getcpunr());
+
   while (currentcpuinfo)
   {
     int cpunr=currentcpuinfo->cpunr;
+    sendstringf("cloaking cpu %d\n", cpunr);
 
     if (cpunr>=cpucount)
     {
@@ -485,6 +493,9 @@ int ept_cloak_activate(QWORD physicalAddress, int mode)
 
     csEnter(&currentcpuinfo->EPTPML4CS);
 
+    currentcpuinfo->eptUpdated=1;
+
+
     QWORD PA;
 
     if (isAMD)
@@ -492,18 +503,18 @@ int ept_cloak_activate(QWORD physicalAddress, int mode)
     else
       PA=EPTMapPhysicalMemory(currentcpuinfo, physicalAddress, 1);
 
-    sendstring("Cloak: After mapping the page as a 4KB page\n");
+    sendstringf("%d Cloak: After mapping the page as a 4KB page\n", cpunr);
 
     cloakdata->eptentry[cpunr]=mapPhysicalMemoryGlobal(PA, sizeof(EPT_PTE));
 
-    sendstringf("Cloak old entry is %6\n", *(QWORD*)(cloakdata->eptentry[cpunr]));
+    sendstringf("%d Cloak old entry is %6\n", cpunr,  *(QWORD*)(cloakdata->eptentry[cpunr]));
 
 
     if (isAMD)
     {
       //Make it non-executable, and make the data read be the fake data
       _PTE_PAE temp;
-      temp=*((PPTE_PAE)&cloakdata->PhysicalAddressData);  // *(PPTE_PAE)(cloakdata->eptentry[cpunr]);
+      temp=*((PPTE_PAE)&cloakdata->PhysicalAddressData); //read data
 
       temp.P=1;
       temp.RW=1;
@@ -527,11 +538,11 @@ int ept_cloak_activate(QWORD physicalAddress, int mode)
       *(cloakdata->eptentry[cpunr])=temp;
     }
 
-    sendstringf("Cloak new entry is %6\n", *(QWORD*)(cloakdata->eptentry[cpunr]));
+    sendstringf("%d Cloak new entry is %6\n", cpunr, *(QWORD*)(cloakdata->eptentry[cpunr]));
 
 
     _wbinvd();
-    currentcpuinfo->eptUpdated=1;
+    currentcpuinfo->eptUpdated=1; //set this before unlock, so if a NP exception happens before the next vmexit is handled it knows not to remap it with full access
 
     csLeave(&currentcpuinfo->EPTPML4CS);
 
@@ -546,7 +557,6 @@ int ept_cloak_activate(QWORD physicalAddress, int mode)
   sendstringf("Invalidating ept\n");
 
   ept_invalidate();
-
 
   csLeave(&CloakedPagesCS);
   return 0;
@@ -1345,21 +1355,21 @@ BOOL ept_handleWatchEvent(pcpuinfo currentcpuinfo, VMRegisters *registers, PFXSA
   }
 
   //run once
+  sendstringf("%d Making page fully accessible", currentcpuinfo->cpunr);
+
   if (isAMD)
   {
-    npte->EXB=0;
-    npte->P=1;
-    npte->RW=1;
+    npte->EXB=0;  //execute allow
+    npte->P=1;    //read allow
+    npte->RW=1;   //write allow
   }
   else
   {
-
-    currentcpuinfo->eptWatchList[ID]->XA=1;
-    currentcpuinfo->eptWatchList[ID]->RA=1;
-    currentcpuinfo->eptWatchList[ID]->WA=1;
-
-    sendstringf("Page is accessible. Doing single step\n");
+    currentcpuinfo->eptWatchList[ID]->XA=1; //execute allow
+    currentcpuinfo->eptWatchList[ID]->RA=1; //read allow
+    currentcpuinfo->eptWatchList[ID]->WA=1; //write allow
   }
+  sendstringf("Page is accessible. Doing single step\n");
 
   vmx_enableSingleStepMode();
   vmx_addSingleSteppingReason(currentcpuinfo, 1, ID);
@@ -1398,7 +1408,7 @@ BOOL ept_handleWatchEvent(pcpuinfo currentcpuinfo, VMRegisters *registers, PFXSA
       (PhysicalAddress>=eptWatchList[ID].PhysicalAddress+eptWatchList[ID].Size)
       ))
   {
-    sendstringf("Not logging all and the physical address is not in the exact range\n");
+    sendstringf("%d: Not logging all and the physical address(%6) is not in the exact range (%p-%p)\n", currentcpuinfo->cpunr, PhysicalAddress, eptWatchList[ID].PhysicalAddress, eptWatchList[ID].PhysicalAddress+eptWatchList[ID].Size);
     csLeave(&eptWatchListCS);
     return TRUE; //no need to log it
   }
@@ -1580,7 +1590,26 @@ BOOL ept_handleWatchEvent(pcpuinfo currentcpuinfo, VMRegisters *registers, PFXSA
 
 int ept_handleWatchEventAfterStep(pcpuinfo currentcpuinfo,  int ID)
 {
-  sendstringf("ept_handleWatchEventAfterStep %d  Type=%d\n", ID, eptWatchList[ID].Type);
+  sendstringf("%d ept_handleWatchEventAfterStep %d  Type=%d\n", currentcpuinfo->cpunr, ID, eptWatchList[ID].Type);
+
+  if (isAMD)
+    sendstringf("%d CS:RIP=%x:%6\n", currentcpuinfo->cpunr, currentcpuinfo->vmcb->cs_selector, currentcpuinfo->vmcb->RIP);
+
+  if (ID>eptWatchListPos)
+  {
+    sendstring("Invalid ID\n");
+    return 0;
+  }
+
+
+  if (eptWatchList[ID].Active==0)
+  {
+    sendstring("Inactive ID\n");
+    return 0;
+  }
+
+
+
 
   switch (eptWatchList[ID].Type)
   {
@@ -1592,12 +1621,16 @@ int ept_handleWatchEventAfterStep(pcpuinfo currentcpuinfo,  int ID)
   	    {
   	      PPTE_PAE pte;
   	      pte=(PPTE_PAE)currentcpuinfo->eptWatchList[ID];
-  	      UINT64 oldvalue=*(UINT64 *)pte;
-  	      pte->RW=0;
+  	      if (pte)
+  	      {
+            UINT64 oldvalue=*(UINT64 *)pte;
+            pte->RW=0;
 
-  	      UINT64 newvalue=*(UINT64 *)pte;
+            UINT64 newvalue=*(UINT64 *)pte;
 
-  	      sendstringf("%6 -> %6\n", oldvalue, newvalue);
+            sendstringf("%6 -> %6\n", oldvalue, newvalue);
+  	      }
+
   	    }
   	    else
   	      currentcpuinfo->eptWatchList[ID]->WA=0;
@@ -1651,6 +1684,7 @@ int ept_handleWatchEventAfterStep(pcpuinfo currentcpuinfo,  int ID)
   {
     if (isAMD)
     {
+      sendstringf("AMD: BP after STEP\n");
       currentcpuinfo->vmcb->inject_Type=3; //exception
       currentcpuinfo->vmcb->inject_Vector=int1redirection;
       currentcpuinfo->vmcb->inject_Valid=1;
